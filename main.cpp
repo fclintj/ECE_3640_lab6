@@ -1,36 +1,57 @@
 #include <iostream>
 #include <vector>
 #include <string.h>
+#include <cmath>
 
 // upsampling test
 
 const int IOBUFFSIZE = 1024;
 
-struct sound_header {
+typedef struct {
     int ndim;		// number of dimensions
     int nchan;		// nummber of channels
     int len;    	// length of first dimension
     int fs;			// length of second dimension or sample rate
     int empty;		// length of third dimension
-};
+} sound_header;
+
+typedef struct {
+    int ndim;		// number of dimensions
+    int nchan;		// nummber of channels
+    int len;    	// length of first dimension
+    int empty1;			// length of second dimension or sample rate
+    int empty2;		// length of third dimension
+} transfer_function;
 
 int main(int argc, char* argv[]){
 
     // determine impulse resopnse
-    int L = 8;
-    int D = 4;
-    std::vector<float> h = {0.08, 0.25 , 0.64 , 0.95 , 0.95 , 0.64 , 0.25 , 0.08};
-//    std::vector<float> x = {0.00 , 0.00 , 0.00 , 0.00 , 0.00 , 0.00 , 0.00 , 0.00};
+
+
+
+
+
 
     // read in file
-    char* file_in = "../media/galway11_mono_downsampled2.bin";
-    char* file_out = "../media/galway11_mono_downsampled.bin";
+    char* file_in = argv[1];
+    char* file_out = argv[2];
+    char* file_h = argv[3];
+    int U = atoi(argv[4]);
+    int D = atoi(argv[5]);
 
-    struct sound_header header_x, header_y;
+    int M;  // size of buffer
 
-    FILE *fx, *fy;
+
+    sound_header header_x, header_y;
+    transfer_function header_h;
+
+    FILE *fx, *fy, *fh;
     if (NULL == (fx = fopen(file_in, "rb"))) {
         printf("Error: Cannot find file for input.\n");
+        return -1;
+    }
+    if (NULL == (fh = fopen(file_h, "rb"))) {
+        printf("Error: Cannot open transfer function file for processing.\n");
         return -1;
     }
     if (NULL == (fy = fopen(file_out, "wb"))) {
@@ -38,62 +59,70 @@ int main(int argc, char* argv[]){
         return -1;
     }
 
+
     // read in header
     fread(&header_x, sizeof(header_x), 1, fx);
+    fread(&header_h, sizeof(header_h), 1, fh);
 
+    M = header_h.len;
+    float *h = new float[M];
+    fread(h,sizeof(float),M,fh);
+    M = M-1;
     if(header_x.nchan > 1) { printf("Error: function only takes 1 channel audio"); return -1; }
-    std::cout << header_x.len << std::endl;
-    std::cout << header_x.fs << std::endl;
 
     memcpy(&header_y, &header_x, sizeof(header_x));
-    header_y.len = header_x.len/D+1;
-    header_y.fs = header_x.fs/D;
+
+    header_y.len = round(header_x.len*double(U)/D)+1;
+    header_y.fs = header_x.fs*U/D;
+
     fwrite(&header_y, sizeof(header_x), 1, fy);
 
-    // Processing
-    float t; // Variable for accumulating convolution result
-    int xlen, ylen = 0; // Indexes for input and output buffers
-    int i;          // Index for input data buffer
-    int l=1;        // Down sampling counter
-    int k=0;        // Index for circular data buffer
-    int n;          // Convolution loop index for filter coefficients and circular data buffer
+    float t;          // Variable for accumulating convolution result
+    int xlen, ylen=0; // Indexes for input and output buffers
+    int i;            // Index for input data buffer
+    int j;            // Index for up sampling loop
+    int k=0;          // Index for circular data buffer
+    int m;            // Convolution loop indx for filter coefficients
+    int n;            // Convolution loop index for circular data buffer
+    int l=1;          // Down sampling counter
+
     int test_sum = 0;
     float x[IOBUFFSIZE], y[IOBUFFSIZE];
-    xlen = fread(x,sizeof(float),IOBUFFSIZE,fx); // Read in first chunk of input
+    float *g = (float*)calloc(M, sizeof(float));
 
-    float *g = (float*)calloc(h.size(), sizeof(float));
-
-    while(xlen>0) { // While there are samples to be processed, keep processing
-        for(i=0; i<xlen; i++) { // Process each of the input samples
-            k = (k+h.size()-1) % h.size();    // Update circular index of filter circular data buffer
-            g[k] = x[i];          // Put each sample into the filter circular data buffer
-            l = (l+D-1) % D;      // Update downsampling index
-            if(l==0) {            // Down sampling condition: Compute convolution result when needed
-                for(t=0.0, n=0; n<h.size(); n++) { // Convolution loop
-                    t += h[n]*g[(n+k) % h.size()];   // Multiply and accumulate into local variable
-                }                            // End convolution loop
-                y[ylen] = t;           // Save convolution result into output buffer
-                ylen++;                // Increment the index for the output buffer
-                if(ylen==IOBUFFSIZE) { // If output buffer is full, then save it to output file
-                    fwrite(y,sizeof(float),ylen,fy); // Write the output buffer
-                    test_sum += ylen;
-                    ylen = 0;               // Reset the index for the output buffer
-                }
-            } // End down sampling condition
-        } // End loop over input samples
+    xlen = fread(x,sizeof(float),IOBUFFSIZE,fx);// Read in first chunk of input samples
+    while(xlen>0) {                             // While there are samples to be processed, keep processing
+        for(i=0; i<xlen; i++) {                 // Process each of the input samples
+            k = (k+M-1) % M;      // Update circular index of filter circular data buffer
+            g[k] = x[i];                        // Put each sample into the filter circular data buffer
+            l = (l+D-1) % D;
+            if(l==0) {                          // Down sampling condition: Compute convolution result when needed
+                for (j = 0; j < U; j++) {       // Loop over the up sampled outputs
+                    for (t = 0.0, m = 0, n = 0; n < M; n++, m += U) { // Convolution loop
+                        t += h[m + j] * g[(n + k) % M];            // Multiply and accumulate into local variable
+                    }                           // End convolution loop
+                    y[ylen] = t;                // Save result into output buffer
+                    ylen++;                     // Increment the index for the output buffer
+                    if (ylen == IOBUFFSIZE) {   // If output buffer is full, then save it to output file
+                        fwrite(y, sizeof(float), ylen, fy); // Write the output buffer
+                        test_sum += ylen;
+                        ylen = 0;               // Reset the index for the output buffer
+                    }
+                }                               // End loop over up sampled outputs
+            }
+        }                                       // End loop over input samples
         xlen = fread(x,sizeof(float),IOBUFFSIZE,fx); // Read in next chunk of input samples
     }
     // Finish writing the last chunk of output samples
-    if(ylen>0) {                       // If output buffer is full, then save it to output file
-        fwrite(y,sizeof(float),ylen,fy); // Write the output buffer
+    if(ylen>0) {                                // If output buffer is full, then save it to output file
+        fwrite(y,sizeof(float),ylen,fy);        // Write the output buffer
         test_sum += ylen;
-        ylen = 0;                        // Reset the index for the output buffer
+        ylen = 0;                               // Reset the index for the output buffer
     }
-    std::cout << "\n" << test_sum << std::endl;
     fclose(fx);
     fclose(fy);
     free(g);
-    std::cout << "success" <<std::endl;
-
+    std::cout << "header: " << header_y.len << std::endl;
+    std::cout << "actual written: " << test_sum << std::endl;
     return 0;
 }
